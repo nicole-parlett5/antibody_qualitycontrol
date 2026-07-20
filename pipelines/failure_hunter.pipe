@@ -1,0 +1,201 @@
+{
+  "components": [
+    {
+      "id": "chat_1",
+      "provider": "chat",
+      "config": {
+        "hideForm": true,
+        "mode": "Source",
+        "parameters": {},
+        "type": "chat"
+      },
+      "ui": {
+        "position": {
+          "x": 20,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "llm_anthropic_1",
+      "provider": "llm_anthropic",
+      "config": {
+        "profile": "claude-sonnet-4-6",
+        "claude-sonnet-4-6": {
+          "apikey": "${ROCKETRIDE_ANTHROPIC_KEY}"
+        },
+        "parameters": {}
+      },
+      "control": [
+        {
+          "classType": "llm",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 130,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "memory_internal_1",
+      "provider": "memory_internal",
+      "config": {
+        "type": "memory_internal"
+      },
+      "control": [
+        {
+          "classType": "memory",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 340,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "tool_python_1",
+      "provider": "tool_python",
+      "config": {
+        "type": "tool_python",
+        "timeout": 60,
+        "allowedModules": []
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 550,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 40
+        }
+      }
+    },
+    {
+      "id": "tool_http_request_1",
+      "provider": "tool_http_request",
+      "config": {
+        "type": "tool_http_request",
+        "allowGET": false,
+        "allowPOST": true,
+        "allowPUT": false,
+        "allowPATCH": false,
+        "allowDELETE": false,
+        "allowHEAD": false,
+        "allowOPTIONS": false,
+        "rateLimitPerSecond": 10,
+        "rateLimitPerMinute": 100,
+        "maxConcurrentRequests": 5,
+        "urlWhitelist": [
+          {
+            "whitelistPattern": "^https://api\\.linkup\\.so/v1/(fetch|search)$"
+          }
+        ]
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 760,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 40
+        }
+      }
+    },
+    {
+      "id": "agent_rocketride_1",
+      "provider": "agent_rocketride",
+      "config": {
+        "agent_description": "Independently searches for documented antibody failure/non-specificity reports (PubPeer, Reddit, ResearchGate, and general web), reporting neutrally without judging.",
+        "instructions": [
+          "ROLE: You are the Failure Hunter stage -- a SEPARATE, independent agent from the Evidence Grader. Your only job is surfacing documented failure/non-specificity reports for this antibody. You do not weigh positive evidence and you must never let it dilute or soften negative findings. The question contains the identity JSON (target_protein, clone_id, url).",
+          "TONE RULE: phrase findings as \"N reports of failure found: [links]\", never as an assertion like \"this antibody doesn't work\" -- you are an evidence aggregator, not a judge. A single matching post must be labeled an uncorroborated anecdote, never given the same weight as multiple independent reports.",
+          "STEP 1 -- BUILD IDENTIFIER: identifier = space-joined (target_protein, clone_id, and the first segment of the product URL's domain, e.g. \"thermofisher\" from thermofisher.com), omitting any missing piece.",
+          "STEP 2 -- SEARCH (3 separate tool_http_request calls, all POST https://api.linkup.so/v1/search, headers {\"Content-Type\": \"application/json\", \"Authorization\": \"Bearer ${ROCKETRIDE_LINKUP_APIKEY}\"}): (a) body {\"q\": \"\\\"<identifier>\\\"\", \"depth\": \"standard\", \"outputType\": \"searchResults\", \"includeDomains\": [\"pubpeer.com\", \"reddit.com\", \"researchgate.net\"]} -> this is FORUM_RESPONSE. (b) body {\"q\": \"\\\"<identifier>\\\" discontinued\", \"depth\": \"standard\", \"outputType\": \"searchResults\"} (no includeDomains -- general web search) -> DISCONTINUED_RESPONSE. (c) body {\"q\": \"\\\"<identifier>\\\" failed\", \"depth\": \"standard\", \"outputType\": \"searchResults\"} (no includeDomains) -> FAILED_RESPONSE. Make all three calls regardless of what any of them return.",
+          "STEP 3 -- ASSEMBLE: Run the exact code below via tool_python with IDENTITY set to the identity JSON from the question and FORUM_RESPONSE/DISCONTINUED_RESPONSE/FAILED_RESPONSE set to the three parsed JSON response bodies from step 2. Change nothing else:\\n\\nimport json\nimport re\nimport urllib.parse\n\nFORUM_DOMAINS = [\"pubpeer.com\", \"reddit.com\", \"researchgate.net\"]\nFAILURE_PATTERNS = [\n    r\"does(?:n't| not) work\", r\"did not work\", r\"didn't work\",\n    r\"no signal\", r\"failed to detect\", r\"non-specific\", r\"nonspecific\",\n    r\"cross-react(?:ed|s|ivity)?\", r\"false positive\", r\"unreliable\",\n    r\"discontinued\", r\"withdrawn\", r\"avoid this antibody\", r\"waste of money\",\n    r\"not specific\", r\"couldn't reproduce\", r\"could not reproduce\",\n    r\"flagged (?:as|for)\", r\"pubpeer\", r\"non-selective\",\n]\n\ndef build_identifier(identity):\n    vendor = None\n    if identity.get(\"url\"):\n        host = urllib.parse.urlparse(identity[\"url\"]).netloc.lower().removeprefix(\"www.\")\n        vendor = host.split(\".\")[0] if host else None\n    parts = [identity.get(\"target_protein\"), identity.get(\"clone_id\"), vendor]\n    return \" \".join(p for p in parts if p)\n\ndef _matches_any(patterns, text):\n    for pattern in patterns:\n        match = re.search(pattern, text, re.IGNORECASE)\n        if match:\n            return match\n    return None\n\ndef _sentence_containing(text, match_span, context=150):\n    start, end = match_span\n    return text[max(0, start - context): min(len(text), end + context)].strip()\n\ndef _normalize_title(title):\n    if not title:\n        return \"\"\n    t = title.lower()\n    t = re.sub(r\"^\\(pdf\\)\\s*\", \"\", t)\n    t = re.sub(r\"\\s*[-|]\\s*(pubmed|pmc|researchgate|nih|ncbi)\\.?\\s*$\", \"\", t)\n    t = re.sub(r\"\\s+\", \" \", t).strip()\n    return t\n\ndef _names_this_antibody(text, target_protein, clone_id):\n    text = text.lower()\n    if target_protein and target_protein.lower() in text:\n        return True\n    if clone_id and clone_id.lower() in text:\n        return True\n    return False\n\ndef parse_search_results(body):\n    return [\n        {\"title\": hit.get(\"name\"), \"url\": hit.get(\"url\"), \"snippet\": hit.get(\"content\")}\n        for hit in body.get(\"results\", [])\n    ]\n\n# TODO by the agent: fill these in.\nIDENTITY = {}  # TODO: the exact identity JSON from the question\nFORUM_RESPONSE = {}  # TODO: JSON response body from the forum-scoped search call\nDISCONTINUED_RESPONSE = {}  # TODO: JSON response body from the \"<identifier> discontinued\" search call\nFAILED_RESPONSE = {}  # TODO: JSON response body from the \"<identifier> failed\" search call\n\nidentifier = build_identifier(IDENTITY)\ntarget_protein = IDENTITY.get(\"target_protein\")\nclone_id = IDENTITY.get(\"clone_id\")\n\nraw_hits = []\nfor hit in parse_search_results(FORUM_RESPONSE):\n    hit[\"found_via\"] = \"forum_scoped\"\n    raw_hits.append(hit)\nfor hit in parse_search_results(DISCONTINUED_RESPONSE):\n    hit[\"found_via\"] = \"general_discontinued\"\n    raw_hits.append(hit)\nfor hit in parse_search_results(FAILED_RESPONSE):\n    hit[\"found_via\"] = \"general_failed\"\n    raw_hits.append(hit)\n\nseen_urls = set()\nreports = []\nfor hit in raw_hits:\n    url = hit.get(\"url\")\n    if not url or url in seen_urls:\n        continue\n    title = hit.get(\"title\") or \"\"\n    snippet = hit.get(\"snippet\") or \"\"\n    text = title + \" \" + snippet\n    failure_match = _matches_any(FAILURE_PATTERNS, text)\n    if not failure_match:\n        continue\n    if not _names_this_antibody(text, target_protein, clone_id):\n        continue\n    seen_urls.add(url)\n    reports.append({\n        \"source\": urllib.parse.urlparse(url).netloc,\n        \"url\": url,\n        \"title\": hit.get(\"title\"),\n        \"claim\": _sentence_containing(text, failure_match.span()),\n        \"found_via\": hit.get(\"found_via\"),\n    })\n\nn = len(reports)\ndomains = {r[\"source\"] for r in reports}\ndistinct_titles = {_normalize_title(r[\"title\"]) for r in reports}\n\nif n == 0:\n    corroboration = \"no reports found\"\nelif len(distinct_titles) == 1:\n    corroboration = (\n        \"anecdote, uncorroborated\" if n == 1\n        else f\"{n} hits found, but all refer to the same underlying report (indexed on {len(domains)} platform{'s' if len(domains) != 1 else ''}) -- not independent corroboration\"\n    )\nelif len(domains) >= 2:\n    corroboration = f\"corroborated by {len(distinct_titles)} independent reports across {len(domains)} platforms ({n} total hits)\"\nelse:\n    corroboration = f\"corroborated by {len(distinct_titles)} reports, but all from the same platform ({next(iter(domains))})\"\n\nfor r in reports:\n    r[\"corroboration\"] = corroboration\n\nif n == 0:\n    headline = (\"0 reports of failure found in the searched sources. This does not confirm the \"\n                \"antibody performs well -- only that no failure reports surfaced in this search.\")\nelse:\n    links = \", \".join(r[\"url\"] for r in reports)\n    headline = f\"{n} reports of failure found: {links}\"\n\nresult = {\"identifier\": identifier, \"headline\": headline, \"corroboration\": corroboration, \"reports\": reports}\nprint(json.dumps(result))\n",
+          "HARD RULE: You are a mechanical executor, not a judge. Do not use your own reasoning to decide field values, do not \"improve\", reformat, comment on, or partially rewrite the Python code below -- submit it to tool_python exactly as given, character for character, with only the marked TODO placeholders filled in with the real values from this conversation. Every decision (regex matches, tier assignment, corroboration wording) must come from running this exact code, never from your own inference.",
+          "RETURN CONTRACT: Your final answer must be ONLY the exact JSON text that the Python code printed -- no markdown code fences, no explanation, no extra commentary, no reformatting. Do not summarize or paraphrase the JSON. If any tool call fails, return {\"error\": \"<message>\"} as your entire answer instead."
+        ],
+        "max_waves": 8,
+        "parameters": {}
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "chat_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 240,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 86
+        }
+      }
+    },
+    {
+      "id": "response_answers_1",
+      "provider": "response_answers",
+      "config": {
+        "laneName": "answers"
+      },
+      "input": [
+        {
+          "lane": "answers",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 460,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    }
+  ],
+  "project_id": "9c5ef366-9ca2-468d-a9e1-98b326317c3a",
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "version": 1
+}

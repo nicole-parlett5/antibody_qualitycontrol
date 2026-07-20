@@ -19,14 +19,23 @@ import urllib.request
 
 LINKUP_FETCH_URL = "https://api.linkup.so/v1/fetch"
 
-RRID_PATTERN = re.compile(r"RRID[^\n]{0,15}?(AB_\d+)", re.IGNORECASE)
-CLONE_LABEL_PATTERN = re.compile(r"Clone(?:\s*(?:ID|No\.?|Number))?\b\s*(.*)", re.IGNORECASE)
-HOST_PATTERN = re.compile(
-    r"Host[^\n]{0,25}?\b(Rabbit|Mouse|Rat|Goat|Sheep|Chicken|Guinea\s?Pig|"
-    r"Hamster|Donkey|Human|Bovine)\b",
+SPECIES_WORDS = (
+    r"(Rabbit|Mouse|Rat|Goat|Sheep|Chicken|Guinea\s?Pig|Hamster|Donkey|Human|Bovine)"
+)
+
+# (?<![\w/-]) keeps labels from matching inside URL slugs, e.g. a tracking-pixel
+# URL containing "...Antibody-clone-3G0-Monoclonal%2F..." would otherwise match
+# "Clone" and capture garbage from the URL instead of the real field.
+LABEL_GUARD = r"(?<![\w/-])"
+RRID_LABEL_PATTERN = re.compile(LABEL_GUARD + r"RRID\b", re.IGNORECASE)
+CLONE_LABEL_PATTERN = re.compile(
+    LABEL_GUARD + r"Clone(?:\s*(?:ID|No\.?|Number))?\b", re.IGNORECASE
+)
+HOST_LABEL_PATTERN = re.compile(
+    LABEL_GUARD + r"(?:Host|Source)(?:\s*/\s*Isotype|\s+Species)?\b",
     re.IGNORECASE,
 )
-IMMUNOGEN_LABEL_PATTERN = re.compile(r"Immunogen\b\s*(.*)", re.IGNORECASE)
+IMMUNOGEN_LABEL_PATTERN = re.compile(LABEL_GUARD + r"Immunogen\b", re.IGNORECASE)
 HEADING_PATTERN = re.compile(r"^#+\s*(.+)$", re.MULTILINE)
 ANTI_TARGET_PATTERN = re.compile(
     r"Anti[- ]([A-Za-z0-9][A-Za-z0-9/\-\. ]{1,40}?)\s+[Aa]ntibody"
@@ -74,20 +83,30 @@ def _first_heading(text: str):
     return match.group(1) if match else None
 
 
-def _label_value(rest: str):
-    """Given the text following a field label, pull the value whether the
-    source used 'Label: value', 'Label value', or a markdown table row
-    'Label | value |'."""
-    line = rest.split("\n", 1)[0]
-    value = re.sub(r"^[\s:#\|]+", "", line)
-    value = value.split("|", 1)[0].strip()
-    return value
+def _value_after(text: str, label_match, max_span: int = 80):
+    """Given a match on a field label, pull the value that follows -- whether
+    the source used 'Label: value', 'Label value', a markdown table row
+    'Label | value |', or the label and value sit on separate lines
+    ('Label\\n\\nValue\\n\\nNextLabel...', common in rendered spec tables)."""
+    window = text[label_match.end(): label_match.end() + max_span]
+    window = re.sub(r"^[\s:#\|]+", "", window)
+    value = re.split(r"\n\s*\n|\|", window, maxsplit=1)[0]
+    return value.strip()
+
+
+def extract_rrid(text: str):
+    label_match = RRID_LABEL_PATTERN.search(text)
+    if not label_match:
+        return None
+    value = _value_after(text, label_match, max_span=20)
+    rrid_match = re.search(r"AB_\d+", value)
+    return rrid_match.group(0) if rrid_match else None
 
 
 def extract_clone_id(text: str):
     label_match = CLONE_LABEL_PATTERN.search(text)
     if label_match:
-        value = _label_value(label_match.group(1))
+        value = _value_after(text, label_match)
         # guard against matching into unrelated sentences/navigation text
         if value and len(value) <= 30 and re.search(r"\d", value) and not re.search(r"[.!?]", value):
             return value
@@ -104,11 +123,20 @@ def extract_clone_id(text: str):
     return None
 
 
+def extract_host_species(text: str):
+    label_match = HOST_LABEL_PATTERN.search(text)
+    if not label_match:
+        return None
+    value = _value_after(text, label_match, max_span=40)
+    species_match = re.search(SPECIES_WORDS, value, re.IGNORECASE)
+    return species_match.group(1).title() if species_match else None
+
+
 def extract_immunogen(text: str):
     label_match = IMMUNOGEN_LABEL_PATTERN.search(text)
     if not label_match:
         return None
-    value = _label_value(label_match.group(1))
+    value = _value_after(text, label_match, max_span=200)
     return value or None
 
 
@@ -134,8 +162,12 @@ def extract_target_protein(text: str):
 
 
 def extract_fields(text: str) -> dict:
-    rrid_match = RRID_PATTERN.search(text)
-    rrid = f"RRID:{rrid_match.group(1)}" if rrid_match else None
+    # Linkup's markdown escapes underscores (e.g. "AB\_926850"); un-escape
+    # before matching so patterns don't have to account for the backslash.
+    text = text.replace("\\_", "_")
+
+    rrid_id = extract_rrid(text)
+    rrid = f"RRID:{rrid_id}" if rrid_id else None
 
     clonality = None
     if re.search(r"\bmonoclonal\b", text, re.IGNORECASE):
@@ -144,13 +176,12 @@ def extract_fields(text: str) -> dict:
         clonality = "polyclonal"
 
     clone_id = extract_clone_id(text)
-    host_match = HOST_PATTERN.search(text)
 
     return {
         "rrid": rrid,
         "rrid_missing": rrid is None,
         "clone_id": clone_id,
-        "host_species": host_match.group(1).title() if host_match else None,
+        "host_species": extract_host_species(text),
         "clonality": clonality,
         "target_protein": extract_target_protein(text),
         "immunogen": extract_immunogen(text),
@@ -188,6 +219,8 @@ def main():
             result = {"url": url, "error": f"HTTP {e.code}: {e.reason}"}
         except urllib.error.URLError as e:
             result = {"url": url, "error": str(e.reason)}
+        except (OSError, json.JSONDecodeError) as e:
+            result = {"url": url, "error": str(e)}
         print(json.dumps(result, indent=2))
 
 

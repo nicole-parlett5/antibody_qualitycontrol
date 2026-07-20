@@ -1,0 +1,200 @@
+{
+  "components": [
+    {
+      "id": "chat_1",
+      "provider": "chat",
+      "config": {
+        "hideForm": true,
+        "mode": "Source",
+        "parameters": {},
+        "type": "chat"
+      },
+      "ui": {
+        "position": {
+          "x": 20,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "llm_anthropic_1",
+      "provider": "llm_anthropic",
+      "config": {
+        "profile": "claude-sonnet-4-6",
+        "claude-sonnet-4-6": {
+          "apikey": "${ROCKETRIDE_ANTHROPIC_KEY}"
+        },
+        "parameters": {}
+      },
+      "control": [
+        {
+          "classType": "llm",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 130,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "memory_internal_1",
+      "provider": "memory_internal",
+      "config": {
+        "type": "memory_internal"
+      },
+      "control": [
+        {
+          "classType": "memory",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 340,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "tool_python_1",
+      "provider": "tool_python",
+      "config": {
+        "type": "tool_python",
+        "timeout": 60,
+        "allowedModules": []
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 550,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 40
+        }
+      }
+    },
+    {
+      "id": "tool_http_request_1",
+      "provider": "tool_http_request",
+      "config": {
+        "type": "tool_http_request",
+        "allowGET": false,
+        "allowPOST": true,
+        "allowPUT": false,
+        "allowPATCH": false,
+        "allowDELETE": false,
+        "allowHEAD": false,
+        "allowOPTIONS": false,
+        "rateLimitPerSecond": 10,
+        "rateLimitPerMinute": 100,
+        "maxConcurrentRequests": 5,
+        "urlWhitelist": [
+          {
+            "whitelistPattern": "^https://api\\.linkup\\.so/v1/(fetch|search)$"
+          }
+        ]
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 760,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 40
+        }
+      }
+    },
+    {
+      "id": "agent_rocketride_1",
+      "provider": "agent_rocketride",
+      "config": {
+        "agent_description": "Searches Linkup for citation evidence of an antibody's RRID, falling back to a keyword search when the RRID search is weak.",
+        "instructions": [
+          "ROLE: You are the Evidence Harvester stage. The question contains the JSON output from the Identity Resolver stage (an \"identity\" object with url, rrid, rrid_missing, clone_id, target_protein, etc).",
+          "STEP 1 -- CHECK RRID: If identity.rrid_missing is true or identity.rrid is empty, skip straight to STEP 3 with no tool_http_request calls at all.",
+          "STEP 2 -- SEARCH: Otherwise, compute accession = the part of identity.rrid after the colon (e.g. \"RRID:AB_123\" -> \"AB_123\"). Call tool_http_request: POST https://api.linkup.so/v1/search, headers {\"Content-Type\": \"application/json\", \"Authorization\": \"Bearer ${ROCKETRIDE_LINKUP_APIKEY}\"}, body {\"q\": \"\\\"<accession>\\\"\" (the accession wrapped in literal double quotes as an exact-phrase search), \"depth\": \"standard\", \"outputType\": \"searchResults\", \"includeDomains\": [\"ncbi.nlm.nih.gov\", \"biorxiv.org\", \"researchgate.net\", \"antibodyregistry.org\", \"citeab.com\"]}. This is the RRID_SEARCH_RESPONSE. Then check: among its \"results\", count how many have the accession string literally appearing in their \"name\" or \"content\" field. If that count is 0 or 1, make a SECOND tool_http_request call, same URL/headers, with body {\"q\": \"<target_protein> antibody <clone_id> <vendor-name-from-the-url-domain>\" (space-joined, omitting any missing field), \"depth\": \"standard\", \"outputType\": \"searchResults\", \"includeDomains\": [same 5 domains as above]}. This is the KEYWORD_SEARCH_RESPONSE. If the first count was 2 or more, do not make this second call.",
+          "STEP 3 -- ASSEMBLE: Run the exact Python code below via tool_python, with IDENTITY set to the identity JSON from the question, RRID_SEARCH_RESPONSE set to the parsed JSON body from step 2 (or {} if you skipped step 2 per step 1), and KEYWORD_SEARCH_RESPONSE set to the parsed JSON body of the second call if you made one, else left as None. Change nothing else:\n\nimport json\nimport urllib.parse\n\nBASE_DOMAINS = [\"ncbi.nlm.nih.gov\", \"biorxiv.org\", \"researchgate.net\"]\nVENDOR_VALIDATION_DOMAINS = [\"antibodyregistry.org\", \"citeab.com\"]\nMIN_CONFIRMED_HITS = 2\nVENDOR_NAMES_BY_DOMAIN = {\n    \"abcam.com\": \"Abcam\",\n    \"cellsignal.com\": \"Cell Signaling Technology\",\n    \"thermofisher.com\": \"Thermo Fisher Scientific\",\n}\n\ndef vendor_from_url(url):\n    host = urllib.parse.urlparse(url).netloc.lower().removeprefix(\"www.\")\n    for domain, name in VENDOR_NAMES_BY_DOMAIN.items():\n        if host == domain or host.endswith(\".\" + domain):\n            return name\n    return host\n\ndef build_keyword_query(identity):\n    vendor = vendor_from_url(identity[\"url\"]) if identity.get(\"url\") else None\n    terms = [identity.get(\"target_protein\"), \"antibody\", identity.get(\"clone_id\"), vendor]\n    return \" \".join(t for t in terms if t)\n\ndef accession_confirmed(hit, accession):\n    title = hit.get(\"title\") or \"\"\n    snippet = hit.get(\"snippet\") or \"\"\n    haystack = title + \" \" + snippet\n    return accession in haystack\n\ndef dedupe_by_url(hits):\n    seen = set()\n    deduped = []\n    for hit in hits:\n        url = hit.get(\"url\")\n        if url in seen:\n            continue\n        seen.add(url)\n        deduped.append(hit)\n    return deduped\n\ndef parse_search_results(body):\n    return [\n        {\"title\": hit.get(\"name\"), \"url\": hit.get(\"url\"), \"snippet\": hit.get(\"content\")}\n        for hit in body.get(\"results\", [])\n    ]\n\n# TODO by the agent: fill these in.\nIDENTITY = {}  # TODO: the exact identity JSON object from the question\nRRID_SEARCH_RESPONSE = {}  # TODO: JSON response body (as a dict) from the accession search tool_http_request call\nKEYWORD_SEARCH_RESPONSE = None  # TODO: JSON response body (as a dict) from the keyword-fallback tool_http_request call, ONLY if you made that call; otherwise leave None\n\nif IDENTITY.get(\"rrid_missing\", True) or not IDENTITY.get(\"rrid\"):\n    result = {\n        \"rrid\": IDENTITY.get(\"rrid\"),\n        \"evidence\": [],\n        \"note\": \"no RRID \\u2014 evidence harvest skipped, escalate to Tier 2 if needed.\",\n    }\nelse:\n    rrid = IDENTITY[\"rrid\"]\n    accession = rrid.split(\":\")[-1]\n    rrid_hits = parse_search_results(RRID_SEARCH_RESPONSE)\n    for hit in rrid_hits:\n        hit[\"query_strategy\"] = \"rrid_search\"\n    confirmed_count = sum(accession_confirmed(h, accession) for h in rrid_hits)\n    evidence = rrid_hits\n    if confirmed_count < MIN_CONFIRMED_HITS and KEYWORD_SEARCH_RESPONSE is not None:\n        keyword_hits = parse_search_results(KEYWORD_SEARCH_RESPONSE)\n        for hit in keyword_hits:\n            hit[\"query_strategy\"] = \"keyword_fallback\"\n        evidence = dedupe_by_url(rrid_hits + keyword_hits)\n    result = {\"rrid\": rrid, \"evidence\": evidence, \"note\": None}\n\nprint(json.dumps(result))\n",
+          "HARD RULE: You are a mechanical executor, not a judge. Do not use your own reasoning to decide field values, do not \"improve\", reformat, comment on, or partially rewrite the Python code below -- submit it to tool_python exactly as given, character for character, with only the marked TODO placeholders filled in with the real values from this conversation. Every decision (regex matches, tier assignment, corroboration wording) must come from running this exact code, never from your own inference.",
+          "RETURN CONTRACT: Your final answer must be ONLY the exact JSON text that the Python code printed -- no markdown code fences, no explanation, no extra commentary, no reformatting. Do not summarize or paraphrase the JSON. If any tool call fails, return {\"error\": \"<message>\"} as your entire answer instead."
+        ],
+        "max_waves": 8,
+        "parameters": {}
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "chat_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 240,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 86
+        }
+      }
+    },
+    {
+      "id": "response_answers_1",
+      "provider": "response_answers",
+      "config": {
+        "laneName": "answers"
+      },
+      "input": [
+        {
+          "lane": "answers",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 460,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    }
+  ],
+  "project_id": "d5acc091-6d3f-4e66-b398-9c6fb64dbc58",
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "version": 1
+}

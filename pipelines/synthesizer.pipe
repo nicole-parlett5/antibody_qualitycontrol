@@ -1,0 +1,160 @@
+{
+  "components": [
+    {
+      "id": "chat_1",
+      "provider": "chat",
+      "config": {
+        "hideForm": true,
+        "mode": "Source",
+        "parameters": {},
+        "type": "chat"
+      },
+      "ui": {
+        "position": {
+          "x": 20,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "llm_anthropic_1",
+      "provider": "llm_anthropic",
+      "config": {
+        "profile": "claude-sonnet-4-6",
+        "claude-sonnet-4-6": {
+          "apikey": "${ROCKETRIDE_ANTHROPIC_KEY}"
+        },
+        "parameters": {}
+      },
+      "control": [
+        {
+          "classType": "llm",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 130,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "memory_internal_1",
+      "provider": "memory_internal",
+      "config": {
+        "type": "memory_internal"
+      },
+      "control": [
+        {
+          "classType": "memory",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 340,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "tool_python_1",
+      "provider": "tool_python",
+      "config": {
+        "type": "tool_python",
+        "timeout": 60,
+        "allowedModules": []
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 550,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 40
+        }
+      }
+    },
+    {
+      "id": "agent_rocketride_1",
+      "provider": "agent_rocketride",
+      "config": {
+        "agent_description": "Rolls up identity, graded evidence, and negative-evidence findings into one final antibody QC scorecard. Pure data merge, no network calls.",
+        "instructions": [
+          "ROLE: You are the Synthesizer stage -- the final node. You receive, in the question, the Identity Resolver's identity JSON, the Evidence Grader's graded-evidence JSON, and the Failure Hunter's negative-evidence JSON (all three, since Grader and Failure Hunter ran in parallel off earlier stages). You perform NO network calls and NO judgment of your own -- you purely roll up the three inputs via the exact code below.",
+          "STEP 1 -- RUN: Execute the code below via tool_python, filling in IDENTITY, GRADED, and FAILURE_RESULT with the exact three JSON objects from the question. Change nothing else:\\n\\nimport json\n\nTIER_LABELS = {\n    0: \"Tier 0 \\u2014 knockout/knockdown validated, independent of vendor\",\n    1: \"Tier 1 \\u2014 orthogonal validation (RNA correlation / HPA)\",\n    2: \"Tier 2 \\u2014 independent antibody agreement\",\n    3: \"Tier 3 \\u2014 peer-reviewed use with described control\",\n    4: \"Tier 4 \\u2014 peer-reviewed use, no control described\",\n    5: \"Tier 5 \\u2014 vendor/registry data only\",\n    \"negative\": \"Negative \\u2014 documented failure/non-specificity reported\",\n}\nTIER_ORDER = [0, 1, 2, 3, 4, 5]\n\ndef synthesize(identity, graded, failure_result):\n    evidence = graded.get(\"graded_evidence\", [])\n    negatives = [e for e in evidence if e[\"tier\"] == \"negative\"]\n    positives = [e for e in evidence if e[\"tier\"] != \"negative\"]\n\n    if not evidence:\n        overall_tier = None\n        overall_label = graded.get(\"note\") or \"no evidence found\"\n    elif positives:\n        best = min(positives, key=lambda e: TIER_ORDER.index(e[\"tier\"]))\n        overall_tier = best[\"tier\"]\n        overall_label = TIER_LABELS[overall_tier]\n    else:\n        overall_tier = \"negative\"\n        overall_label = TIER_LABELS[\"negative\"]\n\n    negative_evidence = None\n    if failure_result is not None:\n        negative_evidence = {\n            \"identifier\": failure_result.get(\"identifier\"),\n            \"headline\": failure_result.get(\"headline\"),\n            \"corroboration\": failure_result.get(\"corroboration\"),\n            \"reports\": failure_result.get(\"reports\", []),\n        }\n\n    return {\n        \"url\": identity.get(\"url\"),\n        \"rrid\": identity.get(\"rrid\"),\n        \"rrid_missing\": identity.get(\"rrid_missing\"),\n        \"target_protein\": identity.get(\"target_protein\"),\n        \"clone_id\": identity.get(\"clone_id\"),\n        \"host_species\": identity.get(\"host_species\"),\n        \"clonality\": identity.get(\"clonality\"),\n        \"lot_variable\": identity.get(\"lot_variable\"),\n        \"overall_tier\": overall_tier,\n        \"overall_tier_label\": overall_label,\n        \"flagged_negative_reports\": negatives,\n        \"negative_evidence\": negative_evidence,\n        \"evidence\": [\n            {\n                \"url\": e[\"url\"], \"title\": e[\"title\"], \"tier\": e[\"tier\"],\n                \"tier_label\": TIER_LABELS[e[\"tier\"]], \"query_strategy\": e[\"query_strategy\"],\n                \"reason\": e[\"reason\"], \"quote\": e[\"quote\"],\n            }\n            for e in evidence\n        ],\n    }\n\n# TODO by the agent: fill these in.\nIDENTITY = {}  # TODO: the identity JSON (from the Identity Resolver stage, earlier in this conversation)\nGRADED = {}  # TODO: the Evidence Grader's exact JSON output\nFAILURE_RESULT = {}  # TODO: the Failure Hunter's exact JSON output\n\nprint(json.dumps(synthesize(IDENTITY, GRADED, FAILURE_RESULT)))\n",
+          "HARD RULE: You are a mechanical executor, not a judge. Do not use your own reasoning to decide field values, do not \"improve\", reformat, comment on, or partially rewrite the Python code below -- submit it to tool_python exactly as given, character for character, with only the marked TODO placeholders filled in with the real values from this conversation. Every decision (regex matches, tier assignment, corroboration wording) must come from running this exact code, never from your own inference.",
+          "RETURN CONTRACT: Your final answer must be ONLY the exact JSON text that the Python code printed -- no markdown code fences, no explanation, no extra commentary, no reformatting. Do not summarize or paraphrase the JSON. If any tool call fails, return {\"error\": \"<message>\"} as your entire answer instead."
+        ],
+        "max_waves": 4,
+        "parameters": {}
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "chat_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 240,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 86
+        }
+      }
+    },
+    {
+      "id": "response_answers_1",
+      "provider": "response_answers",
+      "config": {
+        "laneName": "answers"
+      },
+      "input": [
+        {
+          "lane": "answers",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 460,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    }
+  ],
+  "project_id": "3ae1b329-ada3-413a-afe5-fe6265df4c2a",
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "version": 1
+}

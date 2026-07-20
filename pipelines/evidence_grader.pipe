@@ -1,0 +1,201 @@
+{
+  "components": [
+    {
+      "id": "chat_1",
+      "provider": "chat",
+      "config": {
+        "hideForm": true,
+        "mode": "Source",
+        "parameters": {},
+        "type": "chat"
+      },
+      "ui": {
+        "position": {
+          "x": 20,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "llm_anthropic_1",
+      "provider": "llm_anthropic",
+      "config": {
+        "profile": "claude-sonnet-4-6",
+        "claude-sonnet-4-6": {
+          "apikey": "${ROCKETRIDE_ANTHROPIC_KEY}"
+        },
+        "parameters": {}
+      },
+      "control": [
+        {
+          "classType": "llm",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 130,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "memory_internal_1",
+      "provider": "memory_internal",
+      "config": {
+        "type": "memory_internal"
+      },
+      "control": [
+        {
+          "classType": "memory",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 340,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "tool_python_1",
+      "provider": "tool_python",
+      "config": {
+        "type": "tool_python",
+        "timeout": 60,
+        "allowedModules": []
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 550,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 40
+        }
+      }
+    },
+    {
+      "id": "tool_http_request_1",
+      "provider": "tool_http_request",
+      "config": {
+        "type": "tool_http_request",
+        "allowGET": false,
+        "allowPOST": true,
+        "allowPUT": false,
+        "allowPATCH": false,
+        "allowDELETE": false,
+        "allowHEAD": false,
+        "allowOPTIONS": false,
+        "rateLimitPerSecond": 10,
+        "rateLimitPerMinute": 100,
+        "maxConcurrentRequests": 5,
+        "urlWhitelist": [
+          {
+            "whitelistPattern": "^https://api\\.linkup\\.so/v1/(fetch|search)$"
+          }
+        ]
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 760,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 40
+        }
+      }
+    },
+    {
+      "id": "agent_rocketride_1",
+      "provider": "agent_rocketride",
+      "config": {
+        "agent_description": "Grades harvested evidence into Uhlen et al. validation tiers, fetching full text to confirm any hit whose snippet suggests a strong tier or names this antibody.",
+        "instructions": [
+          "ROLE: You are the Evidence Grader stage, applying the Uhlen et al. (Nature Methods 2016) antibody-validation tiers (0=knockout/knockdown validated, 1=orthogonal validation, 2=independent antibody agreement, 3=peer-reviewed use with described control, 4=peer-reviewed use no control, 5=vendor/registry data only, negative=documented failure). The question contains the Evidence Harvester's JSON output plus the identity's target_protein and clone_id.",
+          "HARD RULE: usage alone never earns Tier 0-2, and a control/knockout mention only counts if the same text also names this specific antibody's RRID or clone -- never infer, always verify via the code below.",
+          "STEP 1 -- PLAN: Run the code below via tool_python with MODE effectively \"plan\" (this is the first code block), filling in HARVEST_RESULT/TARGET_PROTEIN/CLONE_ID from the question. It prints {\"urls_to_fetch\": [...]}-- the non-registry hits worth checking against their full text.\n\nimport json\nimport re\n\nREGISTRY_DOMAINS = (\"antibodyregistry.org\", \"citeab.com\")\nNEGATIVE_PATTERNS = [r\"did not work\", r\"does not work\", r\"failed to detect\", r\"non-specific\", r\"nonspecific\", r\"discontinued\", r\"no signal was detected\", r\"unable to validate\", r\"cross-react(?:ed|s|ivity)? with\", r\"recommend(?:ed)? against\", r\"pubpeer\"]\nTIER0_PATTERNS = [r\"knockout\", r\"knock-out\", r\"\\bko\\b\", r\"knockdown\", r\"knock-down\", r\"\\bsirna\\b\", r\"\\bshrna\\b\", r\"crispr\", r\"gene[- ]edited\", r\"null mutant\", r\"-/-\\s*(cells|mice)\"]\nTIER1_PATTERNS = [r\"rna correlation\", r\"mrna expression correlat\", r\"human protein atlas\", r\"\\bhpa\\b\", r\"transcriptomic correlation\", r\"orthogonal validation\"]\nTIER2_PATTERNS = [r\"independent antibod\", r\"second(?:ary)? antibody (?:confirm|validat)\", r\"another antibody\", r\"concordant\", r\"multiple antibodies\", r\"cross-validated with\"]\nTIER3_CONTROL_PATTERNS = [r\"isotype control\", r\"negative control\", r\"peptide competition\", r\"blocking peptide\", r\"secondary-only control\", r\"loading control\", r\"positive control\", r\"validated? (?:in|with|using) \"]\n\ndef _matches_any(patterns, text):\n    for pattern in patterns:\n        match = re.search(pattern, text, re.IGNORECASE)\n        if match:\n            return match\n    return None\n\ndef _is_registry_domain(url):\n    return any(domain in (url or \"\") for domain in REGISTRY_DOMAINS)\n\ndef _sentence_containing(text, match_span, context=200):\n    start, end = match_span\n    return text[max(0, start - context): min(len(text), end + context)].strip()\n\ndef _mentions_this_antibody(text, rrid, clone_id):\n    text = text.replace(\"\\\\_\", \"_\").lower()\n    if rrid:\n        accession = rrid.split(\":\")[-1]\n        if accession and accession.lower() in text:\n            return True\n    if clone_id and clone_id.lower() in text:\n        return True\n    return False\n\ndef _grade_text(text, source_label, rrid=None, clone_id=None):\n    identifier_confirmed = _mentions_this_antibody(text, rrid, clone_id) if (rrid or clone_id) else True\n    neg_match = _matches_any(NEGATIVE_PATTERNS, text)\n    if neg_match and identifier_confirmed:\n        return {\"tier\": \"negative\", \"reason\": f\"documented failure/non-specificity language in {source_label}\", \"quote\": _sentence_containing(text, neg_match.span())}\n    any_strong_match = None\n    for tier, patterns, label in [(0, TIER0_PATTERNS, \"knockout/knockdown language\"), (1, TIER1_PATTERNS, \"orthogonal validation language\"), (2, TIER2_PATTERNS, \"independent antibody agreement language\")]:\n        match = _matches_any(patterns, text)\n        if match:\n            any_strong_match = any_strong_match or match\n            if identifier_confirmed:\n                return {\"tier\": tier, \"reason\": f\"{label} found in {source_label}\", \"quote\": _sentence_containing(text, match.span())}\n    control_match = _matches_any(TIER3_CONTROL_PATTERNS, text)\n    if control_match and identifier_confirmed:\n        return {\"tier\": 3, \"reason\": f\"peer-reviewed use with an explicitly described control ({source_label})\", \"quote\": _sentence_containing(text, control_match.span())}\n    if not identifier_confirmed and (neg_match or any_strong_match or control_match):\n        return {\"tier\": 4, \"reason\": f\"{source_label} contains control/failure/knockout language, but never names this antibody's RRID/clone -- not attributable to it\", \"quote\": None}\n    return {\"tier\": 4, \"reason\": f\"peer-reviewed use, no control described ({source_label})\", \"quote\": None}\n\ndef grade_from_snippet(hit, rrid=None, clone_id=None):\n    if _is_registry_domain(hit.get(\"url\", \"\")):\n        return {\"tier\": 5, \"reason\": \"vendor/registry catalog entry, not independent validation\", \"quote\": None}\n    title = hit.get(\"title\") or \"\"\n    snippet = hit.get(\"snippet\") or \"\"\n    text = title + \" \" + snippet\n    return _grade_text(text, \"snippet\", rrid, clone_id)\n\ndef _is_directly_relevant(hit, target_protein, clone_id):\n    title = hit.get(\"title\") or \"\"\n    snippet = hit.get(\"snippet\") or \"\"\n    text = (title + \" \" + snippet).lower()\n    if target_protein and target_protein.lower() in text:\n        return True\n    if clone_id and clone_id.lower() in text:\n        return True\n    return False\n\nHARVEST_RESULT = {}  # TODO: exact evidence_harvester JSON output from the question\nTARGET_PROTEIN = None  # TODO: identity.target_protein (from earlier context)\nCLONE_ID = None  # TODO: identity.clone_id (from earlier context)\n\nif HARVEST_RESULT.get(\"note\") or not HARVEST_RESULT.get(\"evidence\"):\n    print(json.dumps({\"urls_to_fetch\": []}))\nelse:\n    urls_to_fetch = []\n    for hit in HARVEST_RESULT[\"evidence\"]:\n        grade = grade_from_snippet(hit, HARVEST_RESULT.get(\"rrid\"), CLONE_ID)\n        is_registry = _is_registry_domain(hit.get(\"url\", \"\"))\n        snippet_suggests_strong_tier = grade[\"tier\"] in (0, 1, 2)\n        directly_relevant = not is_registry and _is_directly_relevant(hit, TARGET_PROTEIN, CLONE_ID)\n        if not is_registry and (snippet_suggests_strong_tier or directly_relevant):\n            urls_to_fetch.append(hit[\"url\"])\n    print(json.dumps({\"urls_to_fetch\": urls_to_fetch}))\n",
+          "STEP 2 -- FETCH: For each url in urls_to_fetch (skip entirely if the list is empty), call tool_http_request: POST https://api.linkup.so/v1/fetch, headers {\"Content-Type\": \"application/json\", \"Authorization\": \"Bearer ${ROCKETRIDE_LINKUP_APIKEY}\"}, body {\"url\": \"<the url>\", \"renderJs\": true}. Take the \"markdown\" field as that url's full text. IMPORTANT: if the returned text contains the phrase \"checking your browser\" (case-insensitive), that is a bot-challenge page, not real content -- retry the same call up to 2 more times (3 attempts total) until you get real content or exhaust retries.",
+          "STEP 3 -- FINAL: Run the second code block below via tool_python, with HARVEST_RESULT/TARGET_PROTEIN/CLONE_ID set exactly as in step 1, and FULL_TEXTS set to a dict mapping each url from step 2 to the full text you fetched for it (use whatever you got even after retries; if a url still returns nothing usable, omit it from FULL_TEXTS so it falls back to the snippet-level grade). This prints the final graded_evidence JSON.\n\nimport json\nimport re\n\nREGISTRY_DOMAINS = (\"antibodyregistry.org\", \"citeab.com\")\nNEGATIVE_PATTERNS = [r\"did not work\", r\"does not work\", r\"failed to detect\", r\"non-specific\", r\"nonspecific\", r\"discontinued\", r\"no signal was detected\", r\"unable to validate\", r\"cross-react(?:ed|s|ivity)? with\", r\"recommend(?:ed)? against\", r\"pubpeer\"]\nTIER0_PATTERNS = [r\"knockout\", r\"knock-out\", r\"\\bko\\b\", r\"knockdown\", r\"knock-down\", r\"\\bsirna\\b\", r\"\\bshrna\\b\", r\"crispr\", r\"gene[- ]edited\", r\"null mutant\", r\"-/-\\s*(cells|mice)\"]\nTIER1_PATTERNS = [r\"rna correlation\", r\"mrna expression correlat\", r\"human protein atlas\", r\"\\bhpa\\b\", r\"transcriptomic correlation\", r\"orthogonal validation\"]\nTIER2_PATTERNS = [r\"independent antibod\", r\"second(?:ary)? antibody (?:confirm|validat)\", r\"another antibody\", r\"concordant\", r\"multiple antibodies\", r\"cross-validated with\"]\nTIER3_CONTROL_PATTERNS = [r\"isotype control\", r\"negative control\", r\"peptide competition\", r\"blocking peptide\", r\"secondary-only control\", r\"loading control\", r\"positive control\", r\"validated? (?:in|with|using) \"]\n\ndef _matches_any(patterns, text):\n    for pattern in patterns:\n        match = re.search(pattern, text, re.IGNORECASE)\n        if match:\n            return match\n    return None\n\ndef _is_registry_domain(url):\n    return any(domain in (url or \"\") for domain in REGISTRY_DOMAINS)\n\ndef _sentence_containing(text, match_span, context=200):\n    start, end = match_span\n    return text[max(0, start - context): min(len(text), end + context)].strip()\n\ndef _mentions_this_antibody(text, rrid, clone_id):\n    text = text.replace(\"\\\\_\", \"_\").lower()\n    if rrid:\n        accession = rrid.split(\":\")[-1]\n        if accession and accession.lower() in text:\n            return True\n    if clone_id and clone_id.lower() in text:\n        return True\n    return False\n\ndef _grade_text(text, source_label, rrid=None, clone_id=None):\n    identifier_confirmed = _mentions_this_antibody(text, rrid, clone_id) if (rrid or clone_id) else True\n    neg_match = _matches_any(NEGATIVE_PATTERNS, text)\n    if neg_match and identifier_confirmed:\n        return {\"tier\": \"negative\", \"reason\": f\"documented failure/non-specificity language in {source_label}\", \"quote\": _sentence_containing(text, neg_match.span())}\n    any_strong_match = None\n    for tier, patterns, label in [(0, TIER0_PATTERNS, \"knockout/knockdown language\"), (1, TIER1_PATTERNS, \"orthogonal validation language\"), (2, TIER2_PATTERNS, \"independent antibody agreement language\")]:\n        match = _matches_any(patterns, text)\n        if match:\n            any_strong_match = any_strong_match or match\n            if identifier_confirmed:\n                return {\"tier\": tier, \"reason\": f\"{label} found in {source_label}\", \"quote\": _sentence_containing(text, match.span())}\n    control_match = _matches_any(TIER3_CONTROL_PATTERNS, text)\n    if control_match and identifier_confirmed:\n        return {\"tier\": 3, \"reason\": f\"peer-reviewed use with an explicitly described control ({source_label})\", \"quote\": _sentence_containing(text, control_match.span())}\n    if not identifier_confirmed and (neg_match or any_strong_match or control_match):\n        return {\"tier\": 4, \"reason\": f\"{source_label} contains control/failure/knockout language, but never names this antibody's RRID/clone -- not attributable to it\", \"quote\": None}\n    return {\"tier\": 4, \"reason\": f\"peer-reviewed use, no control described ({source_label})\", \"quote\": None}\n\ndef grade_from_snippet(hit, rrid=None, clone_id=None):\n    if _is_registry_domain(hit.get(\"url\", \"\")):\n        return {\"tier\": 5, \"reason\": \"vendor/registry catalog entry, not independent validation\", \"quote\": None}\n    title = hit.get(\"title\") or \"\"\n    snippet = hit.get(\"snippet\") or \"\"\n    text = title + \" \" + snippet\n    return _grade_text(text, \"snippet\", rrid, clone_id)\n\ndef _is_directly_relevant(hit, target_protein, clone_id):\n    title = hit.get(\"title\") or \"\"\n    snippet = hit.get(\"snippet\") or \"\"\n    text = (title + \" \" + snippet).lower()\n    if target_protein and target_protein.lower() in text:\n        return True\n    if clone_id and clone_id.lower() in text:\n        return True\n    return False\n\nHARVEST_RESULT = {}  # TODO: same exact evidence_harvester JSON as the plan step\nTARGET_PROTEIN = None  # TODO: same as plan step\nCLONE_ID = None  # TODO: same as plan step\nFULL_TEXTS = {}  # TODO: {url: fetched_full_text} for every url returned by the plan step\n\nif HARVEST_RESULT.get(\"note\"):\n    result = {\"rrid\": HARVEST_RESULT.get(\"rrid\"), \"graded_evidence\": [], \"note\": HARVEST_RESULT[\"note\"]}\nelif not HARVEST_RESULT.get(\"evidence\"):\n    result = {\"rrid\": HARVEST_RESULT.get(\"rrid\"), \"graded_evidence\": [], \"note\": \"no evidence found \\u2014 search ran but returned nothing usable\"}\nelse:\n    rrid = HARVEST_RESULT.get(\"rrid\")\n    graded = []\n    for hit in HARVEST_RESULT[\"evidence\"]:\n        grade = grade_from_snippet(hit, rrid, CLONE_ID)\n        is_registry = _is_registry_domain(hit.get(\"url\", \"\"))\n        snippet_suggests_strong_tier = grade[\"tier\"] in (0, 1, 2)\n        directly_relevant = not is_registry and _is_directly_relevant(hit, TARGET_PROTEIN, CLONE_ID)\n        if not is_registry and (snippet_suggests_strong_tier or directly_relevant):\n            full_text = FULL_TEXTS.get(hit[\"url\"])\n            if full_text is None:\n                grade = dict(grade, reason=grade[\"reason\"] + \" -- full text could not be fetched to confirm; kept snippet-level grade\")\n            else:\n                full_grade = _grade_text(full_text, \"full text\", rrid, CLONE_ID)\n                if not (grade[\"tier\"] == \"negative\" and full_grade[\"tier\"] != \"negative\"):\n                    grade = full_grade\n        graded.append({\"url\": hit.get(\"url\"), \"title\": hit.get(\"title\"), \"query_strategy\": hit.get(\"query_strategy\"), \"tier\": grade[\"tier\"], \"reason\": grade[\"reason\"], \"quote\": grade.get(\"quote\")})\n    result = {\"rrid\": rrid, \"graded_evidence\": graded, \"note\": None}\n\nprint(json.dumps(result))\n",
+          "HARD RULE: You are a mechanical executor, not a judge. Do not use your own reasoning to decide field values, do not \"improve\", reformat, comment on, or partially rewrite the Python code below -- submit it to tool_python exactly as given, character for character, with only the marked TODO placeholders filled in with the real values from this conversation. Every decision (regex matches, tier assignment, corroboration wording) must come from running this exact code, never from your own inference.",
+          "RETURN CONTRACT: Your final answer must be ONLY the exact JSON text that the Python code printed -- no markdown code fences, no explanation, no extra commentary, no reformatting. Do not summarize or paraphrase the JSON. If any tool call fails, return {\"error\": \"<message>\"} as your entire answer instead."
+        ],
+        "max_waves": 30,
+        "parameters": {}
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "chat_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 240,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 86
+        }
+      }
+    },
+    {
+      "id": "response_answers_1",
+      "provider": "response_answers",
+      "config": {
+        "laneName": "answers"
+      },
+      "input": [
+        {
+          "lane": "answers",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 460,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    }
+  ],
+  "project_id": "9ebc7de2-eef9-461e-b4f4-e8ee26104fa1",
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "version": 1
+}

@@ -1,0 +1,199 @@
+{
+  "components": [
+    {
+      "id": "chat_1",
+      "provider": "chat",
+      "config": {
+        "hideForm": true,
+        "mode": "Source",
+        "parameters": {},
+        "type": "chat"
+      },
+      "ui": {
+        "position": {
+          "x": 20,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "llm_anthropic_1",
+      "provider": "llm_anthropic",
+      "config": {
+        "profile": "claude-sonnet-4-6",
+        "claude-sonnet-4-6": {
+          "apikey": "${ROCKETRIDE_ANTHROPIC_KEY}"
+        },
+        "parameters": {}
+      },
+      "control": [
+        {
+          "classType": "llm",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 130,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "memory_internal_1",
+      "provider": "memory_internal",
+      "config": {
+        "type": "memory_internal"
+      },
+      "control": [
+        {
+          "classType": "memory",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 340,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    },
+    {
+      "id": "tool_python_1",
+      "provider": "tool_python",
+      "config": {
+        "type": "tool_python",
+        "timeout": 60,
+        "allowedModules": []
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 550,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 40
+        }
+      }
+    },
+    {
+      "id": "tool_http_request_1",
+      "provider": "tool_http_request",
+      "config": {
+        "type": "tool_http_request",
+        "allowGET": false,
+        "allowPOST": true,
+        "allowPUT": false,
+        "allowPATCH": false,
+        "allowDELETE": false,
+        "allowHEAD": false,
+        "allowOPTIONS": false,
+        "rateLimitPerSecond": 10,
+        "rateLimitPerMinute": 100,
+        "maxConcurrentRequests": 5,
+        "urlWhitelist": [
+          {
+            "whitelistPattern": "^https://api\\.linkup\\.so/v1/(fetch|search)$"
+          }
+        ]
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 760,
+          "y": 360
+        },
+        "measured": {
+          "width": 150,
+          "height": 40
+        }
+      }
+    },
+    {
+      "id": "agent_rocketride_1",
+      "provider": "agent_rocketride",
+      "config": {
+        "agent_description": "Resolves antibody identity fields (RRID, clone, host species, clonality, target, immunogen) from a vendor product page URL.",
+        "instructions": [
+          "ROLE: You are the Identity Resolver stage of an antibody QC pipeline. The question you receive contains one vendor antibody product page URL. You extract structured identity fields from that page's content.",
+          "STEP 1 -- FETCH: Call tool_http_request: method POST, url \"https://api.linkup.so/v1/fetch\", headers {\"Content-Type\": \"application/json\", \"Authorization\": \"Bearer ${ROCKETRIDE_LINKUP_APIKEY}\"}, body {\"url\": \"<the product URL>\", \"renderJs\": true}. Take the \"markdown\" field of the JSON response as the fetched text.",
+          "STEP 2 -- EXTRACT: Run the exact Python code below via tool_python. Replace only the two TODO placeholders (MARKDOWN_TEXT with the fetched markdown string from step 1, PRODUCT_URL with the exact URL from the question) -- change nothing else:\n\nimport json\nimport re\n\nSPECIES_WORDS = r\"(Rabbit|Mouse|Rat|Goat|Sheep|Chicken|Guinea\\s?Pig|Hamster|Donkey|Human|Bovine)\"\nLABEL_GUARD = r\"(?<![\\w/-])\"\nRRID_LABEL_PATTERN = re.compile(LABEL_GUARD + r\"RRID\\b\", re.IGNORECASE)\nCLONE_LABEL_PATTERN = re.compile(LABEL_GUARD + r\"Clone(?:\\s*(?:ID|No\\.?|Number))?\\b\", re.IGNORECASE)\nHOST_LABEL_PATTERN = re.compile(LABEL_GUARD + r\"(?:Host|Source)(?:\\s*/\\s*Isotype|\\s+Species)?\\b\", re.IGNORECASE)\nIMMUNOGEN_LABEL_PATTERN = re.compile(LABEL_GUARD + r\"Immunogen\\b\", re.IGNORECASE)\nHEADING_PATTERN = re.compile(r\"^#+\\s*(.+)$\", re.MULTILINE)\nANTI_TARGET_PATTERN = re.compile(r\"Anti[- ]([A-Za-z0-9][A-Za-z0-9/\\-\\. ]{1,40}?)\\s+[Aa]ntibody\")\nTITLE_NOISE_WORDS = re.compile(r\"\\b(Antibody|Monoclonal|Polyclonal|Recombinant|Rabbit|Mouse|Rat|Goat|Sheep|Chicken|Human|mAb|pAb|Ab)\\b\", re.IGNORECASE)\n\ndef _first_heading(text):\n    match = HEADING_PATTERN.search(text)\n    return match.group(1) if match else None\n\ndef _value_after(text, label_match, max_span=80):\n    window = text[label_match.end(): label_match.end() + max_span]\n    window = re.sub(r\"^[\\s:#\\|]+\", \"\", window)\n    value = re.split(r\"\\n\\s*\\n|\\|\", window, maxsplit=1)[0]\n    return value.strip()\n\ndef extract_rrid(text):\n    label_match = RRID_LABEL_PATTERN.search(text)\n    if not label_match:\n        return None\n    value = _value_after(text, label_match, max_span=20)\n    rrid_match = re.search(r\"AB_\\d+\", value)\n    return rrid_match.group(0) if rrid_match else None\n\ndef extract_clone_id(text):\n    label_match = CLONE_LABEL_PATTERN.search(text)\n    if label_match:\n        value = _value_after(text, label_match)\n        if value and len(value) <= 30 and re.search(r\"\\d\", value) and not re.search(r\"[.!?]\", value):\n            return value\n    heading = _first_heading(text)\n    if not heading:\n        return None\n    for token in re.findall(r\"[\\[\\(]([A-Za-z0-9\\-\\.]{2,15})[\\]\\)]\", heading):\n        if re.fullmatch(r\"ab\\d+\", token, re.IGNORECASE):\n            continue\n        if not re.search(r\"\\d\", token) or not re.search(r\"[A-Za-z]\", token):\n            continue\n        return token\n    return None\n\ndef extract_host_species(text):\n    label_match = HOST_LABEL_PATTERN.search(text)\n    if not label_match:\n        return None\n    value = _value_after(text, label_match, max_span=40)\n    species_match = re.search(SPECIES_WORDS, value, re.IGNORECASE)\n    return species_match.group(1).title() if species_match else None\n\ndef extract_immunogen(text):\n    label_match = IMMUNOGEN_LABEL_PATTERN.search(text)\n    if not label_match:\n        return None\n    value = _value_after(text, label_match, max_span=200)\n    return value or None\n\ndef extract_target_protein(text):\n    anti_match = ANTI_TARGET_PATTERN.search(text)\n    if anti_match:\n        return anti_match.group(1).strip()\n    heading = _first_heading(text)\n    if not heading:\n        return None\n    title = re.sub(r\"\\[[^\\]]*\\]\", \"\", heading)\n    prev = None\n    while prev != title:\n        prev = title\n        title = re.sub(r\"\\([^()]*\\)\", \"\", title)\n    title = title.replace(\"(\", \"\").replace(\")\", \"\")\n    title = re.sub(r\"#\\S+\", \"\", title)\n    title = TITLE_NOISE_WORDS.sub(\"\", title)\n    title = re.sub(r\"\\s+\", \" \", title).strip(\" -,.\")\n    return title or None\n\ndef extract_fields(text):\n    text = text.replace(\"\\\\_\", \"_\")\n    rrid_id = extract_rrid(text)\n    rrid = f\"RRID:{rrid_id}\" if rrid_id else None\n    clonality = None\n    if re.search(r\"\\bmonoclonal\\b\", text, re.IGNORECASE):\n        clonality = \"monoclonal\"\n    elif re.search(r\"\\bpolyclonal\\b\", text, re.IGNORECASE):\n        clonality = \"polyclonal\"\n    clone_id = extract_clone_id(text)\n    return {\n        \"rrid\": rrid,\n        \"rrid_missing\": rrid is None,\n        \"clone_id\": clone_id,\n        \"host_species\": extract_host_species(text),\n        \"clonality\": clonality,\n        \"target_protein\": extract_target_protein(text),\n        \"immunogen\": extract_immunogen(text),\n        \"lot_variable\": clonality == \"polyclonal\" and clone_id is None,\n    }\n\nMARKDOWN_TEXT = \"\"\"TODO_PASTE_FETCHED_MARKDOWN_HERE\"\"\"\nPRODUCT_URL = \"TODO_PASTE_PRODUCT_URL_HERE\"\n\nfields = extract_fields(MARKDOWN_TEXT)\nresult = {\"url\": PRODUCT_URL, **fields, \"raw_text\": MARKDOWN_TEXT}\nprint(json.dumps(result))\n",
+          "HARD RULE: You are a mechanical executor, not a judge. Do not use your own reasoning to decide field values, do not \"improve\", reformat, comment on, or partially rewrite the Python code below -- submit it to tool_python exactly as given, character for character, with only the marked TODO placeholders filled in with the real values from this conversation. Every decision (regex matches, tier assignment, corroboration wording) must come from running this exact code, never from your own inference.",
+          "RETURN CONTRACT: Your final answer must be ONLY the exact JSON text that the Python code printed -- no markdown code fences, no explanation, no extra commentary, no reformatting. Do not summarize or paraphrase the JSON. If any tool call fails, return {\"error\": \"<message>\"} as your entire answer instead."
+        ],
+        "max_waves": 6,
+        "parameters": {}
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "chat_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 240,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 86
+        }
+      }
+    },
+    {
+      "id": "response_answers_1",
+      "provider": "response_answers",
+      "config": {
+        "laneName": "answers"
+      },
+      "input": [
+        {
+          "lane": "answers",
+          "from": "agent_rocketride_1"
+        }
+      ],
+      "ui": {
+        "position": {
+          "x": 460,
+          "y": 200
+        },
+        "measured": {
+          "width": 150,
+          "height": 66
+        }
+      }
+    }
+  ],
+  "project_id": "6053e150-19d2-4c6b-966d-38b09524335c",
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "version": 1
+}

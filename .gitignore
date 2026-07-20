@@ -1,2 +1,4 @@
 .rocketride/
 .env
+/output/
+/debug/
